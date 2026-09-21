@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Dyno Barcode Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root { font-family: Arial, "Noto Sans Thai", sans-serif; color:#0f172a; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#f1f5f9; min-height:100vh; }
+    header { background:#4338ca; color:white; padding:14px 16px; font-weight:700; }
+    main { max-width:520px; margin:0 auto; padding:14px; }
+    .card { background:white; border:1px solid #e2e8f0; border-radius:16px; padding:14px; box-shadow:0 1px 4px rgba(15,23,42,.08); }
+    #reader { width:100%; min-height:250px; background:#0f172a; border-radius:14px; overflow:hidden; }
+    #reader video { width:100% !important; object-fit:cover; }
+    button { width:100%; border:0; border-radius:12px; padding:13px; font-weight:700; font-size:15px; cursor:pointer; }
+    .primary { background:#4f46e5; color:white; }
+    .secondary { background:#e2e8f0; color:#334155; }
+    .warn { background:#f59e0b; color:white; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+    .msg { margin-top:10px; padding:11px; border-radius:10px; font-size:13px; text-align:center; }
+    .info { background:#eef2ff; color:#3730a3; }
+    .ok { background:#dcfce7; color:#166534; }
+    .err { background:#fee2e2; color:#991b1b; }
+    .small { font-size:11px; color:#64748b; line-height:1.55; margin:10px 2px; }
+  </style>
+</head>
+<body>
+<header>📷 Dyno Live Barcode Scanner</header>
+<main>
+  <div class="card">
+    <div id="reader"></div>
+    <div id="message" class="msg info">กด “เริ่มสแกน” เพื่อเปิดกล้องหลัง</div>
+
+    <div class="grid">
+      <button id="startBtn" class="primary" onclick="startScanner()">▶ เริ่มสแกน</button>
+      <button id="stopBtn" class="secondary" onclick="stopScanner()" disabled>⏹ ปิดกล้อง</button>
+      <button id="torchBtn" class="warn" onclick="toggleTorch()" disabled>🔦 เปิดไฟ</button>
+      <button class="secondary" onclick="startScanner(true)">🔄 รีสตาร์ท</button>
+    </div>
+
+    <p class="small">
+      เล็งบาร์โค้ดให้อยู่กลางกรอบแนวนอน • ถือห่างประมาณ 15–30 ซม. •
+      ลดแสงสะท้อนบนฉลาก • เมื่ออ่านสำเร็จ ระบบจะส่งเลขกลับไปหน้า Shopee Tracking อัตโนมัติ
+    </p>
+  </div>
+</main>
+
+<script>
+let scanner = null;
+let running = false;
+let busy = false;
+let torchOn = false;
+let lastCode = '';
+let lastAt = 0;
+const DUP_MS = 2500;
+
+function formats1D() {
+  const f = window.Html5QrcodeSupportedFormats;
+  if (!f) return undefined;
+  return [
+    f.CODE_128, f.CODE_39, f.CODE_93, f.CODABAR,
+    f.EAN_13, f.EAN_8, f.UPC_A, f.UPC_E,
+    f.ITF, f.RSS_14, f.RSS_EXPANDED
+  ].filter(v => typeof v !== 'undefined');
+}
+
+function setMessage(text, type) {
+  const el = document.getElementById('message');
+  el.textContent = text;
+  el.className = 'msg ' + (type || 'info');
+}
+
+function getBox(w, h) {
+  const width = Math.max(230, Math.min(460, Math.floor(w * .9)));
+  const height = Math.max(90, Math.min(150, Math.floor(width * .28)));
+  return { width, height };
+}
+
+function makeScanner() {
+  if (scanner) return scanner;
+  const cfg = {
+    verbose:false,
+    experimentalFeatures:{ useBarCodeDetectorIfSupported:true }
+  };
+  const formats = formats1D();
+  if (formats && formats.length) cfg.formatsToSupport = formats;
+  scanner = new Html5Qrcode('reader', cfg);
+  return scanner;
+}
+
+async function chooseRearCamera() {
+  try {
+    const cams = await Html5Qrcode.getCameras();
+    if (!cams || !cams.length) return null;
+
+    const rearWords = /back|rear|environment|หลัง|0/i;
+    const preferred =
+      cams.find(c => rearWords.test(String(c.label || ''))) ||
+      cams[cams.length - 1];
+
+    return preferred && preferred.id ? preferred.id : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function startScanner(forceRestart) {
+  if (forceRestart) await stopScanner(true);
+  if (running || busy) return;
+
+  busy = true;
+  setMessage('กำลังขอสิทธิ์และเปิดกล้อง...', 'info');
+
+  try {
+    const s = makeScanner();
+    const cameraId = await chooseRearCamera();
+
+    const camera = cameraId
+      ? cameraId
+      : { facingMode:'environment' };
+
+    await s.start(
+      camera,
+      {
+        fps:12,
+        qrbox:getBox,
+        aspectRatio:1.7777778,
+        disableFlip:true
+      },
+      onDecoded,
+      () => {}
+    );
+
+    running = true;
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    setMessage('พร้อมสแกน — เล็งบาร์โค้ดเข้ากรอบ', 'ok');
+    updateTorch();
+  } catch (e) {
+    console.error(e);
+    setMessage(
+      'เปิดกล้องไม่สำเร็จ: ' + (e && e.message ? e.message : e),
+      'err'
+    );
+    await stopScanner(true);
+  } finally {
+    busy = false;
+  }
+}
+
+async function stopScanner(silent) {
+  try {
+    if (scanner && running) await scanner.stop();
+  } catch (e) {}
+  try {
+    if (scanner) await scanner.clear();
+  } catch (e) {}
+
+  scanner = null;
+  running = false;
+  torchOn = false;
+
+  const s = document.getElementById('startBtn');
+  const p = document.getElementById('stopBtn');
+  const t = document.getElementById('torchBtn');
+  if (s) s.disabled = false;
+  if (p) p.disabled = true;
+  if (t) t.disabled = true;
+
+  if (!silent) setMessage('ปิดกล้องแล้ว', 'info');
+}
+
+function getFormatName(result) {
+  try {
+    return String(
+      result &&
+      result.result &&
+      result.result.format &&
+      (result.result.format.formatName || result.result.format)
+      || ''
+    );
+  } catch (e) {
+    return '';
+  }
+}
+
+function is1D(name) {
+  const n = String(name || '').toUpperCase();
+  if (n.includes('QR')) return false;
+  return true;
+}
+
+async function onDecoded(text, result) {
+  const code = String(text || '').trim();
+  if (!code || busy) return;
+
+  const fmt = getFormatName(result);
+  if (!is1D(fmt)) return;
+
+  const now = Date.now();
+  if (code === lastCode && now - lastAt < DUP_MS) return;
+  lastCode = code;
+  lastAt = now;
+  busy = true;
+
+  if (navigator.vibrate) {
+    try { navigator.vibrate([80,40,80]); } catch (e) {}
+  }
+
+  setMessage('อ่านสำเร็จ: ' + code + ' — กำลังส่งกลับ...', 'ok');
+
+  const params = new URLSearchParams(location.search);
+  const returnOrigin = params.get('returnOrigin') || '*';
+
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(
+        {
+          type:'DYNO_BARCODE_SCAN',
+          barcode:code,
+          format:fmt || ''
+        },
+        returnOrigin
+      );
+
+      try {
+        if (scanner && typeof scanner.pause === 'function') {
+          scanner.pause(true);
+        }
+      } catch (e) {}
+
+      setTimeout(() => {
+        try { window.close(); } catch (e) {}
+      }, 600);
+
+      return;
+    }
+
+    setMessage(
+      'อ่านได้: ' + code + ' แต่ไม่พบหน้าระบบเดิม กรุณากลับไปหน้า Shopee Tracking',
+      'ok'
+    );
+  } finally {
+    setTimeout(() => { busy = false; }, 1000);
+  }
+}
+
+function updateTorch() {
+  try {
+    if (
+      !scanner ||
+      typeof scanner.getRunningTrackCapabilities !== 'function'
+    ) {
+      return;
+    }
+    const caps = scanner.getRunningTrackCapabilities();
+    document.getElementById('torchBtn').disabled = !(caps && caps.torch);
+  } catch (e) {}
+}
+
+async function toggleTorch() {
+  if (!scanner || !running) return;
+  try {
+    torchOn = !torchOn;
+    await scanner.applyVideoConstraints({
+      advanced:[{ torch:torchOn }]
+    });
+    document.getElementById('torchBtn').textContent =
+      torchOn ? '🔦 ปิดไฟ' : '🔦 เปิดไฟ';
+  } catch (e) {
+    torchOn = false;
+    document.getElementById('torchBtn').disabled = true;
+    setMessage('อุปกรณ์นี้ไม่รองรับการเปิดไฟจาก Browser', 'err');
+  }
+}
+
+window.addEventListener('pagehide', () => stopScanner(true));
+</script>
+</body>
+</html>
